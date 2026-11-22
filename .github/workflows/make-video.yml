@@ -1,0 +1,122 @@
+name: نبض الكريبتو — توليد الفيديو تلقائيًا
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.py"
+      - "requirements.txt"
+      - ".github/workflows/make-video.yml"
+  schedule:
+    # توقيت UTC (اليمن = UTC+3)
+    - cron: "0 0 * * *"      # 03:00 اليمن — افتتاح آسيا
+    - cron: "0 8 * * *"      # 11:00 اليمن — افتتاح أوروبا
+    - cron: "30 14 * * *"    # 17:30 اليمن — افتتاح أمريكا
+    - cron: "0 20 * * *"     # 23:00 اليمن — ملخص اليوم
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "المطلوب"
+        required: true
+        default: single
+        type: choice
+        options:
+          - single      # فيديو واحد الآن (النسختان)
+          - week        # دفعة أسبوع كامل (بدون فيديو لكل يوم = سريع)
+      kind:
+        description: "نوع الفيديو (للوضع single فقط)"
+        required: false
+        default: auto
+        type: choice
+        options: [auto, asia_open, europe_open, us_open, daily_recap, breaking]
+      lang:
+        description: "اللغة"
+        required: true
+        default: both
+        type: choice
+        options: [ar, en, both]
+      days:
+        description: "عدد الأيام (لوضع week)"
+        required: false
+        default: "7"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write          # لحفظ الفيديوهات في المستودع (اختياري)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: تثبيت المتطلبات
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libraqm0 fonts-dejavu
+          pip install -q -r requirements.txt
+          python -c "import PIL; print('Pillow', PIL.__version__, 'raqm:', PIL.features.check('raqm'))"
+
+      - name: احتياطي الخطوط (إن لم تكن مرفوعة)
+        run: |
+          if [ ! -f assets/fonts/Cairo-ExtraBold.ttf ]; then
+            echo "⚠ الخطوط غير موجودة — تنزيلها"
+            python tools/fetch_fonts.py
+          fi
+          ls -1 assets/fonts/ | head
+
+      - name: بناء الفيديوهات
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MODE: ${{ github.event.inputs.mode }}
+          KIND: ${{ github.event.inputs.kind }}
+          LANG_IN: ${{ github.event.inputs.lang }}
+          DAYS: ${{ github.event.inputs.days }}
+        run: |
+          LANG_IN="${LANG_IN:-both}"
+          FLAG="--both"; [ "$LANG_IN" = "ar" ] && FLAG="--lang ar"; [ "$LANG_IN" = "en" ] && FLAG="--lang en"
+          if [ "$MODE" = "week" ]; then
+            python make_week.py --quick --days "${DAYS:-7}" $FLAG
+          elif [ -n "$KIND" ] && [ "$KIND" != "auto" ]; then
+            python make.py --kind "$KIND" $FLAG
+          else
+            python make.py --auto $FLAG
+          fi
+
+      - name: تجميع النواتج
+        run: |
+          python -m src.publish --batch || true
+          du -sh renders/ data/ || true
+
+      - name: رفع النواتج كـ Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-pulse-${{ github.run_number }}
+          path: |
+            renders/**/*.mp4
+            renders/**/*.txt
+            renders/**/schedule.csv
+            renders/**/SCHEDULE.md
+            data/script_*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: نسخ إلى Google Drive (إن وُجد RCLONE_CONF)
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if [ -z "$RCLONE_CONF" ]; then
+            echo "ℹ لا يوجد RCLONE_CONF — تخطي الرفع إلى Drive"
+            exit 0
+          fi
+          curl -s https://rclone.org/install.sh | sudo bash
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONF" | base64 -d > ~/.config/rclone/rclone.conf 2>/dev/null \
+            || echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          rclone copy renders/ gdrive:CryptoPulse/ready/ \
+            --include "*.mp4" --include "*.txt" --include "*.csv" --include "*.md" -v

@@ -1,0 +1,16 @@
+# مخرجات لا تُرفع (يولّدها النظام)
+renders/
+data/*.json
+data/*.jsonl
+__pycache__/
+*.pyc
+.venv/
+.env
+*.mp4
+*.mp3
+*.wav
+
+# لا ترفع أبدًا
+.netrc
+.git-credentials
+rclone.conf
